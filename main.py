@@ -3,8 +3,7 @@
 """
 ================================================================================
  ALL-IN-ONE ADVANCED MEDIA DOWNLOADER & CLOUDFLARE WEB HOSTING BOT
- - Universal Media Downloader (YouTube, FB, Insta, TikTok, Drive, Dropbox)
- - Super Fast Multi-threaded Download Engine
+ - Universal Fast Media Downloader (YouTube, FB, Insta, TikTok, Drive, Dropbox)
  - Video (MP4) & Audio (MP3) Choice with Live Progress Bar
  - Full HTML / CSS / JS / ZIP Web Hosting with Free Cloudflare HTTPS Tunnel
  - Screen-matching USER INFO Card & New User Admin Notifications
@@ -76,7 +75,7 @@ os.makedirs(HOSTED_SITES_DIR, exist_ok=True)
 WEB_PORT = 8080
 CLOUDFLARE_URL = ""
 
-# Wispbyte সেফটি কিউ (র‍্যাম সুরক্ষিত রাখতে)
+# Wispbyte সেফটি কিউ
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(1)
 PENDING_DOWNLOADS = 0
 URL_CACHE = {}
@@ -567,7 +566,7 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
 # ============================================================================
-# ৯. এইচটিএমএল / সিএসএস / জেএস ওয়েব হোস্টিং হ্যান্ডলার (রোবাস্ট ও সুরক্ষিত)
+# ৯. এইচটিএমএল / সিএসএস / জেএস ওয়েব হোস্টিং হ্যান্ডলার (১০০% ফিক্সড)
 # ============================================================================
 async def handle_document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
@@ -592,49 +591,54 @@ async def handle_document_upload(update: Update, context: ContextTypes.DEFAULT_T
     os.makedirs(site_folder, exist_ok=True)
 
     try:
-        clean_name = safe_filename(raw_name)
-        if not (clean_name.endswith('.zip') or clean_name.endswith('.html') or clean_name.endswith('.htm')):
-            clean_name += ".zip" if fname.endswith('.zip') else ".html"
-
-        local_path = os.path.join(site_folder, clean_name)
         file_obj = await context.bot.get_file(doc.file_id)
-        await file_obj.download_to_drive(local_path)
 
-        await safe_edit_text(status_msg, "⚙️ <b>প্রজেক্ট আনজিপ ও সাজানো হচ্ছে...</b>")
+        # ১. যদি সরাসরি HTML ফাইল হয় (সরাসরি index.html নামে সেভ হবে, কোনো ডিলিট/রিনেম এরর হবে না)
+        if fname.endswith(('.html', '.htm')):
+            target_path = os.path.join(site_folder, "index.html")
+            await file_obj.download_to_drive(target_path)
 
-        # ZIP ফাইল আনজিপ করা ও সাব-ফোল্ডার থাকলে সব ফাইল রুট ফোল্ডারে বের করে আনা
-        if fname.endswith('.zip'):
-            with zipfile.ZipFile(local_path, 'r') as zip_ref:
+        # ২. যদি ZIP ফাইল হয়
+        elif fname.endswith('.zip'):
+            temp_zip = os.path.join(site_folder, "archive.zip")
+            await file_obj.download_to_drive(temp_zip)
+
+            await safe_edit_text(status_msg, "⚙️ <b>প্রজেক্ট আনজিপ ও সাজানো হচ্ছে...</b>")
+
+            with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
                 zip_ref.extractall(site_folder)
             try:
-                os.remove(local_path)
+                os.remove(temp_zip)
             except OSError:
                 pass
 
-            extracted_items = os.listdir(site_folder)
-            if len(extracted_items) == 1 and os.path.isdir(os.path.join(site_folder, extracted_items[0])):
-                sub_folder = os.path.join(site_folder, extracted_items[0])
-                for item in os.listdir(sub_folder):
-                    shutil.move(os.path.join(sub_folder, item), site_folder)
+            # যদি জিপ ফাইলের ভেতরে কোনো সাব-ফোল্ডার থাকে, ফাইলগুলো বের করে আনা
+            items = os.listdir(site_folder)
+            if len(items) == 1 and os.path.isdir(os.path.join(site_folder, items[0])):
+                sub_dir = os.path.join(site_folder, items[0])
+                for sub_item in os.listdir(sub_dir):
+                    shutil.move(os.path.join(sub_dir, sub_item), site_folder)
                 try:
-                    os.rmdir(sub_folder)
+                    os.rmdir(sub_dir)
                 except OSError:
                     pass
-        else:
-            target_index = os.path.join(site_folder, "index.html")
-            if os.path.exists(target_index):
-                os.remove(target_index)
-            os.rename(local_path, target_index)
 
-        # index.html আছে কি না নিশ্চিত করা
-        has_index = any(os.path.exists(os.path.join(site_folder, f)) for f in ["index.html", "index.htm"])
-        if not has_index:
-            all_html = [f for f in os.listdir(site_folder) if f.lower().endswith(('.html', '.htm'))]
-            if all_html:
-                os.rename(os.path.join(site_folder, all_html[0]), os.path.join(site_folder, "index.html"))
-            else:
-                await safe_edit_text(status_msg, "❌ <b>জিপ ফাইলে কোনো HTML ফাইল পাওয়া যায়নি!</b>\nপ্রজেক্টে অবশ্যই একটি .html ফাইল থাকতে হবে।")
-                return
+            # index.html আছে কি না যাচাই
+            has_index = False
+            for f in os.listdir(site_folder):
+                if f.lower() in ["index.html", "index.htm"]:
+                    if f != "index.html":
+                        os.rename(os.path.join(site_folder, f), os.path.join(site_folder, "index.html"))
+                    has_index = True
+                    break
+
+            if not has_index:
+                html_files = [f for f in os.listdir(site_folder) if f.lower().endswith(('.html', '.htm'))]
+                if html_files:
+                    os.rename(os.path.join(site_folder, html_files[0]), os.path.join(site_folder, "index.html"))
+                else:
+                    await safe_edit_text(status_msg, "❌ <b>জিপ ফাইলে কোনো HTML (.html) ফাইল পাওয়া যায়নি!</b>")
+                    return
 
         # লাইভ লিঙ্ক তৈরি ও বাটন চেক
         domain = CLOUDFLARE_URL.strip() if CLOUDFLARE_URL else ""
