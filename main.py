@@ -3,6 +3,11 @@
 """
 ================================================================================
  ALL-IN-ONE ADVANCED MEDIA DOWNLOADER & CLOUDFLARE WEB HOSTING BOT
+ - Universal Media Downloader (YouTube, FB, Insta, TikTok, Drive, Dropbox)
+ - Super Fast Multi-threaded Download Engine
+ - Video (MP4) & Audio (MP3) Choice with Live Progress Bar
+ - Full HTML / CSS / JS / ZIP Web Hosting with Free Cloudflare HTTPS Tunnel
+ - Screen-matching USER INFO Card & New User Admin Notifications
 ================================================================================
 """
 
@@ -71,7 +76,7 @@ os.makedirs(HOSTED_SITES_DIR, exist_ok=True)
 WEB_PORT = 8080
 CLOUDFLARE_URL = ""
 
-# Wispbyte সেফটি কিউ
+# Wispbyte সেফটি কিউ (র‍্যাম সুরক্ষিত রাখতে)
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(1)
 PENDING_DOWNLOADS = 0
 URL_CACHE = {}
@@ -137,7 +142,7 @@ def get_all_users():
         return []
 
 # ============================================================================
-# ৩. ইউজার প্রোফাইল কার্ড (স্ক্রিনশটের মতো)
+# ৩. ইউজার প্রোফাইল কার্ড
 # ============================================================================
 async def send_user_info_card(bot, chat_id, user, is_admin_notify=False):
     uname = f"@{user.username}" if user.username else "None"
@@ -268,7 +273,7 @@ VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".3gp"}
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac"}
 
 # ============================================================================
-# ৬. সুপার ফাস্ট yt-dlp ও ডিরেক্ট মিডিয়া ইঞ্জিন
+# ৬. সুপার ফাস্ট yt-dlp ও মিডিয়া ডাউনলোড ইঞ্জিন
 # ============================================================================
 def _run_ytdlp(url, outtmpl, mode, progress_hook):
     cookie_file = "cookies.txt" if os.path.exists("cookies.txt") else None
@@ -562,34 +567,42 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
 # ============================================================================
-# ৯. এইচটিএমএল / সিএসএস / জেএস ওয়েব হোস্টিং হ্যান্ডলার
+# ৯. এইচটিএমএল / সিএসএস / জেএস ওয়েব হোস্টিং হ্যান্ডলার (রোবাস্ট ও সুরক্ষিত)
 # ============================================================================
 async def handle_document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc:
         return
 
-    fname = doc.file_name.lower()
-    if not (fname.endswith('.html') or fname.endswith('.zip')):
+    raw_name = doc.file_name or "project"
+    fname = raw_name.lower()
+
+    if not (fname.endswith('.html') or fname.endswith('.htm') or fname.endswith('.zip')):
         await update.message.reply_text("❌ শুধু <b>.html</b> ফাইল অথবা HTML/CSS/JS সহ <b>.zip</b> ফাইল পাঠান।", parse_mode=ParseMode.HTML)
         return
 
-    if doc.file_size > 15 * 1024 * 1024:
-        await update.message.reply_text("❌ ফাইলটি খুব বড়! সর্বোচ্চ ১৫ MB সাইজের ফাইল হোস্ট করতে পারবেন।")
+    if doc.file_size > 20 * 1024 * 1024:
+        await update.message.reply_text("❌ ফাইলটি খুব বড়! সর্বোচ্চ ২০ MB সাইজের ফাইল হোস্ট করতে পারবেন।")
         return
 
-    status_msg = await update.message.reply_text("⚙️ <b>ওয়েবসাইট প্রসেস ও হোস্ট করা হচ্ছে...</b>", parse_mode=ParseMode.HTML)
+    status_msg = await update.message.reply_text("⚙️ <b>ফাইল প্রসেস ও হোস্ট করা হচ্ছে...</b>", parse_mode=ParseMode.HTML)
 
     site_id = f"site_{str(uuid.uuid4())[:8]}"
     site_folder = os.path.join(HOSTED_SITES_DIR, site_id)
     os.makedirs(site_folder, exist_ok=True)
 
     try:
+        clean_name = safe_filename(raw_name)
+        if not (clean_name.endswith('.zip') or clean_name.endswith('.html') or clean_name.endswith('.htm')):
+            clean_name += ".zip" if fname.endswith('.zip') else ".html"
+
+        local_path = os.path.join(site_folder, clean_name)
         file_obj = await context.bot.get_file(doc.file_id)
-        local_path = os.path.join(site_folder, doc.file_name)
         await file_obj.download_to_drive(local_path)
 
-        # ZIP ফাইল হলে আনজিপ করা
+        await safe_edit_text(status_msg, "⚙️ <b>প্রজেক্ট আনজিপ ও সাজানো হচ্ছে...</b>")
+
+        # ZIP ফাইল আনজিপ করা ও সাব-ফোল্ডার থাকলে সব ফাইল রুট ফোল্ডারে বের করে আনা
         if fname.endswith('.zip'):
             with zipfile.ZipFile(local_path, 'r') as zip_ref:
                 zip_ref.extractall(site_folder)
@@ -598,30 +611,57 @@ async def handle_document_upload(update: Update, context: ContextTypes.DEFAULT_T
             except OSError:
                 pass
 
-        # HTML ফাইলের নাম index.html না হলে রিনেম বা হ্যান্ডেল করা
-        index_exists = any(os.path.exists(os.path.join(site_folder, f)) for f in ["index.html", "index.htm"])
-        if fname.endswith('.html') and not index_exists:
-            os.rename(local_path, os.path.join(site_folder, "index.html"))
+            extracted_items = os.listdir(site_folder)
+            if len(extracted_items) == 1 and os.path.isdir(os.path.join(site_folder, extracted_items[0])):
+                sub_folder = os.path.join(site_folder, extracted_items[0])
+                for item in os.listdir(sub_folder):
+                    shutil.move(os.path.join(sub_folder, item), site_folder)
+                try:
+                    os.rmdir(sub_folder)
+                except OSError:
+                    pass
+        else:
+            target_index = os.path.join(site_folder, "index.html")
+            if os.path.exists(target_index):
+                os.remove(target_index)
+            os.rename(local_path, target_index)
 
-        live_url = f"{CLOUDFLARE_URL}/sites/{site_id}/"
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Website ↗", url=live_url)]])
+        # index.html আছে কি না নিশ্চিত করা
+        has_index = any(os.path.exists(os.path.join(site_folder, f)) for f in ["index.html", "index.htm"])
+        if not has_index:
+            all_html = [f for f in os.listdir(site_folder) if f.lower().endswith(('.html', '.htm'))]
+            if all_html:
+                os.rename(os.path.join(site_folder, all_html[0]), os.path.join(site_folder, "index.html"))
+            else:
+                await safe_edit_text(status_msg, "❌ <b>জিপ ফাইলে কোনো HTML ফাইল পাওয়া যায়নি!</b>\nপ্রজেক্টে অবশ্যই একটি .html ফাইল থাকতে হবে।")
+                return
+
+        # লাইভ লিঙ্ক তৈরি ও বাটন চেক
+        domain = CLOUDFLARE_URL.strip() if CLOUDFLARE_URL else ""
+        if domain.startswith("http"):
+            live_url = f"{domain}/sites/{site_id}/"
+            btn_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Website ↗", url=live_url)]])
+        else:
+            live_url = f"ডোমেইন কানেক্ট হচ্ছে... (পোর্ট: {WEB_PORT})"
+            btn_markup = None
 
         caption = (
             f"🎉 <b>আপনার ওয়েবসাইট সফলভাবে লাইভ হয়েছে!</b>\n\n"
-            f"📁 <b>ফাইল:</b> {doc.file_name}\n"
+            f"📁 <b>ফাইল:</b> <code>{raw_name}</code>\n"
             f"🆔 <b>সাইট আইডি:</b> <code>{site_id}</code>\n"
-            f"🔗 <b>লাইভ লিংক:</b>\n{live_url}\n\n"
-            f"<i>(নিচের বাটনে চাপ দিয়ে সরাসরি ব্রাউজারে দেখুন)</i>"
+            f"🔗 <b>লাইভ লিঙ্ক:</b>\n{live_url}\n\n"
+            f"<i>(উপরের লিংকে ক্লিক করে সরাসরি ব্রাউজারে সাইটটি দেখুন)</i>"
         )
+
         await status_msg.delete()
-        await update.message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await update.message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=btn_markup)
 
     except Exception as e:
         logger.error("Hosting Error: %s", e)
-        await safe_edit_text(status_msg, f"❌ ওয়েবসাইট হোস্টিং ব্যর্থ হয়েছে: {e}")
+        await safe_edit_text(status_msg, f"❌ <b>ওয়েবসাইট হোস্টিং ব্যর্থ হয়েছে:</b>\n<code>{e}</code>")
 
 # ============================================================================
-# ১০. ডেভেলপার টুলস ও অ্যাডমিন কমান্ড হ্যান্ডলার
+# ১০. ডেভেলপার টুলস ও অ্যাডমিন কমান্ড
 # ============================================================================
 async def cmd_b64(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -695,7 +735,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     raw_url = update.message.text.strip()
     if not is_valid_url(raw_url):
-        await update.message.reply_text("🤔 দয়া করে একটি সঠিক ভিডিও লিংক বা কোনো .html/.zip ফাইল পাঠান।")
+        await update.message.reply_text("🤔 দয়া করে একটি সঠিক ভিডিও লিংক অথবা কোনো .html/.zip ফাইল পাঠান।")
         return
 
     url = clean_url(raw_url)
@@ -751,7 +791,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         f"👋 Welcome, <b>{user.first_name}</b>!\n\n"
         "🎬 <b>ভিডিও ডাউনলোডার:</b> যেকোনো YouTube, FB, Insta, TikTok লিংক পাঠান।\n"
-        "🌐 <b>ওয়েব হোস্টিং:</b> যেকোনো <code>.html</code> বা <code>.zip</code> কোড ফাইল পাঠালে সাথে সাথে লাইভ ওয়েবসাইট লিংক পেয়ে যাবেন!"
+        "🚀 <b>ওয়েব হোস্টিং:</b> যেকোনো <code>.html</code> বা <code>.zip</code> কোড ফাইল পাঠালে সাথে সাথে লাইভ ওয়েবসাইট লিংক পেয়ে যাবেন!"
     )
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard())
 
@@ -769,7 +809,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🚀 <b>ফ্রি ওয়েবসাইট হোস্টিং গাইড:</b>\n\n"
             "১. আপনার তৈরি করা <code>index.html</code> ফাইলটি এই বটে ডকুমেন্ট হিসেবে পাঠান।\n"
             "২. অথবা পুরো প্রজেক্টের (HTML, CSS, JS) একটি <code>.zip</code> ফাইল পাঠান।\n"
-            "৩. বট আপনাকে একটি ফ্রি <b>Cloudflare HTTPS</b> ওয়েবসাইট লিংক প্রদান করবে।"
+            "৩. বট সাথে সাথে আপনাকে একটি ফ্রি <b>Cloudflare HTTPS</b> ওয়েবসাইট লিংক প্রদান করবে।"
         )
         await update.message.reply_text(host_info, parse_mode=ParseMode.HTML)
     elif text == BTN_HELP:
@@ -837,12 +877,12 @@ async def main_async():
     app.add_handler(CommandHandler("qr", cmd_qr))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
 
-    # Choices & Files
+    # Choices & Handlers
     app.add_handler(CallbackQueryHandler(handle_callback_choice))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-    logger.info("Bot is fully running...")
+    logger.info("Bot is running...")
     async with app:
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
