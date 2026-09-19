@@ -1,0 +1,6 @@
+python-telegram-bot==21.6
+yt-dlp
+curl_cffi
+requests>=2.31.0
+qrcode[pil]>=7.4.2
+Pillow>=10.0.0
