@@ -2,14 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
- ADVANCED ALL-IN-ONE TELEGRAM MEDIA DOWNLOADER BOT
- Features:
-   - Video (MP4) / Audio (MP3) Choice Buttons
-   - Live Download Progress Bar (Speed, Size, %, ETA)
-   - Queue System (Memory Protection for Free Hosting)
-   - Native Video Thumbnail & Duration Metadata
-   - URL Sanitizer & Platform Auto-Detector
-   - Universal Support: YouTube, FB, Insta, TikTok, Drive, Dropbox, Direct Files
+ ALL-IN-ONE ULTRA-FAST TELEGRAM DOWNLOADER BOT
+ - Screen-matching "USER INFO" Card with Profile Photo
+ - Realtime Multi-threaded Super Fast Downloads
+ - Admin Alert on New User Join
+ - Live Progress Bar & Quality/Audio Selector
 ================================================================================
 """
 
@@ -55,7 +52,7 @@ from telegram.ext import (
 from telegram.error import TelegramError, BadRequest
 
 # ============================================================================
-# ১. কনফিগারেশন
+# ১. কনফিগারেশন ও টোকেন
 # ============================================================================
 BOT_TOKEN_HARDCODED = "8960102537:AAHXyvXEKXs8hleb4iRikgNKveTvmLwpo7Q"
 ADMIN_ID_HARDCODED = 5504272381
@@ -64,14 +61,12 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip() or BOT_TOKEN_HARDCODED.strip
 _ADMIN_ID_RAW = os.environ.get("ADMIN_ID", "").strip() or str(ADMIN_ID_HARDCODED)
 ADMIN_ID = int(_ADMIN_ID_RAW)
 
-MAX_FILE_MB = 48  # টেলিগ্রাম সাধারণ বট লিমিটের ভেতরে রাখতে ৪৮ MB
+MAX_FILE_MB = 48
 MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024
 
-# Wispbyte-এর র‍্যাম বাঁচাতে একসাথে ১টি ডাউনলোড প্রসেস হবে
+# Wispbyte সেফটি কিউ
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(1)
 PENDING_DOWNLOADS = 0
-
-# লিংক ক্যাশ ডিকশনারি (Inline Callback-এর জন্য)
 URL_CACHE = {}
 
 logging.basicConfig(
@@ -81,7 +76,7 @@ logging.basicConfig(
 logger = logging.getLogger("telegram_downloader")
 
 # ============================================================================
-# ২. ক্র্যাশ-প্রুফ ডাটাবেজ
+# ২. ডাটাবেজ (ইউজার ট্র্যাক করার জন্য)
 # ============================================================================
 DB_FILE = "users.db"
 
@@ -89,21 +84,40 @@ def init_db():
     try:
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
-        cur.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
+        cur.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, joined_at TEXT)")
         conn.commit()
         conn.close()
     except Exception as e:
         logger.warning("DB Init warning: %s", e)
 
-def register_user(user_id):
+def register_user(user_id) -> bool:
+    """নতুন ইউজার হলে True রিটার্ন করবে"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-        conn.commit()
+        cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        if row is None:
+            cur.execute("INSERT INTO users (user_id, joined_at) VALUES (?, ?)", 
+                        (user_id, time.strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+            conn.close()
+            return True
         conn.close()
+        return False
     except Exception:
-        pass
+        return False
+
+def count_users() -> int:
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        cnt = cur.fetchone()[0]
+        conn.close()
+        return cnt
+    except Exception:
+        return 1
 
 def get_all_users():
     try:
@@ -117,7 +131,66 @@ def get_all_users():
         return []
 
 # ============================================================================
-# ৩. ইউটিলিটি, লিংক ক্লিনার ও প্ল্যাটফর্ম ডিটেক্টর
+# ৩. ইউজার প্রোফাইল কার্ড বিল্ডার (স্ক্রিনশটের মতো)
+# ============================================================================
+async def send_user_info_card(bot, chat_id, user, is_admin_notify=False):
+    """স্ক্রিনশটের ডিজাইনে প্রোফাইল কার্ড সেন্ড করে"""
+    uname = f"@{user.username}" if user.username else "None"
+    prefix = "🚨 <b>NEW USER NOTIFICATION</b>\n\n" if is_admin_notify else ""
+    
+    caption = (
+        f"{prefix}"
+        f"<b>USER INFO</b>\n\n"
+        f"👤 <b>FIRST NAME :</b> {user.first_name or 'Unknown'}\n"
+        f"🌀 <b>USERNAME :</b> {uname}\n"
+        f"🆔 <b>User Id:</b> <code>{user.id}</code>\n"
+    )
+
+    profile_url = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 View Profile ↗", url=profile_url)]
+    ])
+
+    try:
+        photos = await bot.get_user_profile_photos(user.id, limit=1)
+        if photos.total_count > 0:
+            photo_file_id = photos.photos[0][-1].file_id
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_file_id,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+            return
+    except Exception:
+        pass
+
+    # প্রোফাইল ছবি না থাকলে সাধারণ মেসেজ
+    await bot.send_message(
+        chat_id=chat_id,
+        text=caption,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+# ============================================================================
+# ৪. কিবোর্ড মেনু
+# ============================================================================
+BTN_STATS = "🌐 Statistics"
+BTN_ACCOUNT = "👤 My Account"
+BTN_HELP = "ℹ️ Help"
+BTN_DEV = "💻 Dev Tools"
+
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(BTN_STATS), KeyboardButton(BTN_ACCOUNT)],
+        [KeyboardButton(BTN_HELP), KeyboardButton(BTN_DEV)]
+    ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+
+# ============================================================================
+# ৫. ইউটিলিটি, প্রোগ্রেস বার ও লিংক ক্লিনার
 # ============================================================================
 URL_REGEX = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
 
@@ -125,7 +198,6 @@ def is_valid_url(text: str) -> bool:
     return bool(URL_REGEX.match(text.strip()))
 
 def clean_url(url: str) -> str:
-    """অপ্রয়োজনীয় ট্র্যাকিং প্যারামিটার রিমুভ করে"""
     parsed = urlparse(url)
     bad_params = {'si', 'utm_source', 'utm_medium', 'utm_campaign', 'fbclid', 'igsh', 'feature'}
     qs = parse_qs(parsed.query)
@@ -192,25 +264,11 @@ VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".3gp"}
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac"}
 
 # ============================================================================
-# ৪. বট কিবোর্ড মেনু
-# ============================================================================
-BTN_HELP = "ℹ️ Help"
-BTN_DEV = "💻 Dev Tools"
-BTN_STATS = "📊 Stats"
-
-def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(BTN_HELP), KeyboardButton(BTN_DEV)]]
-    if user_id == ADMIN_ID:
-        rows.append([KeyboardButton(BTN_STATS)])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
-
-# ============================================================================
-# ৫. ইঞ্জিন ১: yt-dlp (ভিডিও, অডিও ও থাম্বনেইল হ্যান্ডলার)
+# ৬. সুপার ফাস্ট yt-dlp ডাউনলোড ইঞ্জিন (স্পিড অপ্টিমাইজড)
 # ============================================================================
 def _run_ytdlp(url, outtmpl, mode, progress_hook):
     cookie_file = "cookies.txt" if os.path.exists("cookies.txt") else None
 
-    # ভিডিও বনাম অডিও ফরম্যাট রুল
     if mode == "audio":
         format_rule = "bestaudio/best"
     else:
@@ -228,22 +286,24 @@ def _run_ytdlp(url, outtmpl, mode, progress_hook):
         "restrictfilenames": True,
         "progress_hooks": [progress_hook],
         "max_filesize": MAX_FILE_BYTES,
-        "socket_timeout": 30,
+        "socket_timeout": 15,
         "cookiefile": cookie_file,
         "source_address": "0.0.0.0",
         "legacy_server_connect": True,
-        "writethumbnail": True,  # প্রিভিউ থাম্বনেইল ডাউনলোড করবে
+        "writethumbnail": True,
+
+        # ⚡ সুপার ফাস্ট স্পিড সেটিংস ⚡
+        "concurrent_fragment_downloads": 8,  # প্যারালাল মাল্টি-থ্রেড ডাউনলোড
+        "buffersize": 1048576,               # ১ MB মেমোরি বাফার
+        "http_chunk_size": 10485760,         # ১০ MB চাংক সাইজ (রকেট স্পিড)
+
         "extractor_args": {
             "youtube": {
                 "player_client": ["android", "ios", "web"]
             }
         },
         "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
     }
 
@@ -258,11 +318,10 @@ async def _download_via_ytdlp(url, mode, user_id, status_msg):
     outtmpl = os.path.join(temp_dir, "%(title).60s.%(ext)s")
     last_edit = {"time": 0.0}
 
-    # লাইভ প্রোগ্রেস হুক
     def progress_hook(d):
         if d.get("status") == "downloading":
             now = time.time()
-            if now - last_edit["time"] < 2.5:
+            if now - last_edit["time"] < 2.0:
                 return
             last_edit["time"] = now
 
@@ -290,7 +349,7 @@ async def _download_via_ytdlp(url, mode, user_id, status_msg):
                 pass
 
         elif d.get("status") == "finished":
-            text = "⚙️ <b>ডাউনলোড সম্পন্ন! ফাইল প্রস্তুত করা হচ্ছে...</b>"
+            text = "⚙️ <b>ডাউনলোড শেষ! ফাইল প্রস্তুত করা হচ্ছে...</b>"
             try:
                 asyncio.run_coroutine_threadsafe(safe_edit_text(status_msg, text), loop)
             except Exception:
@@ -310,7 +369,6 @@ async def _download_via_ytdlp(url, mode, user_id, status_msg):
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise DownloadFailed(f"এরর: {e}") from e
 
-    # আসল মিডিয়া ফাইল খোঁজা
     if not os.path.exists(filename):
         base, _ = os.path.splitext(filename)
         candidates = [f for f in glob.glob(base + ".*") if not f.endswith(('.webp', '.jpg', '.png', '.part'))]
@@ -318,14 +376,13 @@ async def _download_via_ytdlp(url, mode, user_id, status_msg):
             filename = candidates[0]
         else:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            raise DownloadFailed("ডাউনলোডকৃত ফাইলটি খুঁজে পাওয়া যায়নি।")
+            raise DownloadFailed("ডাউনলোডকৃত ফাইলটি পাওয়া যায়নি।")
 
     size = os.path.getsize(filename)
     if size > MAX_FILE_BYTES:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        raise DownloadFailed(f"ফাইলটি খুব বড় ({human_size(size)})! টেলিগ্রামের সর্বোচ্চ লিমিট {MAX_FILE_MB} MB।")
+        raise DownloadFailed(f"ফাইলটি খুব বড় ({human_size(size)})! লিমিট {MAX_FILE_MB} MB।")
 
-    # থাম্বনেইল প্রসেসিং (.webp -> .jpg তে কনভার্ট করা যেন টেলিগ্রামে সাপোর্ট করে)
     thumb_path = None
     for ext in ['.webp', '.jpg', '.png']:
         possible_thumb = os.path.splitext(filename)[0] + ext
@@ -346,33 +403,17 @@ async def _download_via_ytdlp(url, mode, user_id, status_msg):
         "height": info.get("height") or 0,
         "thumb_path": thumb_path
     }
-
     return filename, size, temp_dir, meta
 
 # ============================================================================
-# ৬. ইঞ্জিন ২: Google Drive, Dropbox ও Direct Link
+# ৭. Google Drive, Dropbox ও Direct Link ইঞ্জিন
 # ============================================================================
 def is_google_drive_url(url: str) -> bool:
     return "drive.google.com" in url or "docs.google.com" in url
 
 def extract_gdrive_file_id(url: str):
-    patterns = [
-        r"/file/d/([a-zA-Z0-9_-]{10,})",
-        r"/document/d/([a-zA-Z0-9_-]{10,})",
-        r"/spreadsheets/d/([a-zA-Z0-9_-]{10,})",
-        r"/d/([a-zA-Z0-9_-]{10,})",
-        r"[?&]id=([a-zA-Z0-9_-]{10,})",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, url)
-        if m:
-            return m.group(1)
-    return None
-
-def build_gdrive_direct_url(file_id: str, original_url: str) -> str:
-    if "/document/d/" in original_url:
-        return f"https://docs.google.com/document/d/{file_id}/export?format=pdf"
-    return f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
+    m = re.search(r"/file/d/([a-zA-Z0-9_-]{10,})|id=([a-zA-Z0-9_-]{10,})", url)
+    return m.group(1) or m.group(2) if m else None
 
 def is_dropbox_url(url: str) -> bool:
     return "dropbox.com" in url
@@ -389,21 +430,19 @@ def _http_download_sync(url, dest_dir, progress_cb, referer=None):
     if referer:
         headers["Referer"] = referer
 
-    resp = session.get(url, headers=headers, stream=True, timeout=30, allow_redirects=True)
+    resp = session.get(url, headers=headers, stream=True, timeout=25, allow_redirects=True)
     resp.raise_for_status()
 
     content_type = resp.headers.get("Content-Type", "")
     if "text/html" in content_type and "drive.google.com" in url:
         m = re.search(r"confirm=([0-9A-Za-z_-]+)", resp.text)
         if m:
-            confirm = m.group(1)
-            sep = "&" if "?" in url else "?"
-            resp = session.get(f"{url}{sep}confirm={confirm}", headers=headers, stream=True, timeout=30)
+            resp = session.get(f"{url}&confirm={m.group(1)}", headers=headers, stream=True, timeout=25)
             content_type = resp.headers.get("Content-Type", "")
 
     if "text/html" in content_type:
         resp.close()
-        raise DownloadFailed("লিংকটি সরাসরি মিডিয়া ফাইল নয় (বা এটি প্রাইভেট)।")
+        raise DownloadFailed("লিংকটি সরাসরি মিডিয়া ফাইল নয়।")
 
     total = int(resp.headers.get("Content-Length", 0) or 0)
     if total and total > MAX_FILE_BYTES:
@@ -412,19 +451,14 @@ def _http_download_sync(url, dest_dir, progress_cb, referer=None):
 
     cd = resp.headers.get("Content-Disposition", "")
     m = re.search(r"filename\*?=(?:UTF-8\'\')?\"?([^\";]+)\"?", cd)
-    if m:
-        fname = safe_filename(unquote(m.group(1)))
-    else:
-        path_name = os.path.basename(urlparse(url).path)
-        ext = mimetypes.guess_extension(content_type.split(";")[0].strip()) or ""
-        fname = safe_filename((path_name if "." in path_name else "file") + ext)
+    fname = safe_filename(unquote(m.group(1))) if m else safe_filename(os.path.basename(urlparse(url).path) or "file")
 
     dest_path = os.path.join(dest_dir, fname)
     downloaded = 0
     last_update = {"t": time.time(), "bytes": 0}
 
     with open(dest_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=131072):
+        for chunk in resp.iter_content(chunk_size=262144):  # 256KB Chunks
             if not chunk:
                 continue
             f.write(chunk)
@@ -434,7 +468,7 @@ def _http_download_sync(url, dest_dir, progress_cb, referer=None):
                 raise DownloadFailed(f"ফাইলটি {MAX_FILE_MB} MB লিমিট ছাড়িয়ে গেছে।")
 
             now = time.time()
-            if now - last_update["t"] >= 2.5:
+            if now - last_update["t"] >= 2.0:
                 speed = (downloaded - last_update["bytes"]) / (now - last_update["t"])
                 last_update["t"] = now
                 last_update["bytes"] = downloaded
@@ -462,40 +496,29 @@ async def _download_via_http(url, user_id, status_msg, referer=None):
             pass
 
     try:
-        filepath, size = await loop.run_in_executor(
-            None, _http_download_sync, url, temp_dir, progress_cb, referer
-        )
+        filepath, size = await loop.run_in_executor(None, _http_download_sync, url, temp_dir, progress_cb, referer)
     except Exception as e:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise DownloadFailed(str(e)) from e
 
-    meta = {
-        "title": os.path.basename(filepath),
-        "duration": 0,
-        "width": 0,
-        "height": 0,
-        "thumb_path": None
-    }
+    meta = {"title": os.path.basename(filepath), "duration": 0, "width": 0, "height": 0, "thumb_path": None}
     return filepath, size, temp_dir, meta
 
-# ============================================================================
-# ৭. অল-ইন-ওয়ান ডাউনলোডার রাউটার
-# ============================================================================
 async def perform_universal_download(url: str, mode: str, user_id: int, status_msg):
     if is_google_drive_url(url):
         file_id = extract_gdrive_file_id(url)
         if not file_id:
             raise DownloadFailed("Google Drive আইডি পাওয়া যায়নি।")
-        direct_url = build_gdrive_direct_url(file_id, url)
-        await safe_edit_text(status_msg, "🔎 Google Drive থেকে ফাইল আনা হচ্ছে...")
+        direct_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
+        await safe_edit_text(status_msg, "🔎 Google Drive থেকে ফাইল ফেচ করা হচ্ছে...")
         return await _download_via_http(direct_url, user_id, status_msg)
 
     if is_dropbox_url(url):
         direct_url = normalize_dropbox_url(url)
-        await safe_edit_text(status_msg, "🔎 Dropbox থেকে ফাইল আনা হচ্ছে...")
+        await safe_edit_text(status_msg, "🔎 Dropbox থেকে ফাইল ফেচ করা হচ্ছে...")
         return await _download_via_http(direct_url, user_id, status_msg, referer=url)
 
-    await safe_edit_text(status_msg, "🔎 মিডিয়া তথ্য প্রসেস করা হচ্ছে...")
+    await safe_edit_text(status_msg, "🔎 মিডিয়া তথ্য সংগ্রহ করা হচ্ছে...")
     try:
         return await _download_via_ytdlp(url, mode, user_id, status_msg)
     except DownloadFailed as e:
@@ -508,14 +531,14 @@ async def perform_universal_download(url: str, mode: str, user_id: int, status_m
             raise DownloadFailed("লিংকটি ডাউনলোডের উপযুক্ত নয় বা প্রাইভেট।") from e2
 
 # ============================================================================
-# ৮. কিউ (Queue) ও আপলোড এক্সিকিউটর
+# ৮. কিউ ও আল্ট্রা-ফাস্ট আপলোড লজিক
 # ============================================================================
 async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, url: str, mode: str, status_msg):
     global PENDING_DOWNLOADS
     PENDING_DOWNLOADS += 1
 
     if DOWNLOAD_SEMAPHORE.locked():
-        await safe_edit_text(status_msg, f"⏳ <b>সার্ভার ব্যস্ত রয়েছে...</b>\nলাইনে আপনার অবস্থান: <b>{PENDING_DOWNLOADS}</b> নম্বরে। অপেক্ষা করুন...")
+        await safe_edit_text(status_msg, f"⏳ <b>সার্ভার ব্যস্ত...</b>\nলাইনে অবস্থান: <b>{PENDING_DOWNLOADS}</b> নম্বরে। অপেক্ষা করুন...")
 
     async with DOWNLOAD_SEMAPHORE:
         PENDING_DOWNLOADS -= 1
@@ -523,7 +546,7 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         try:
             filepath, size, temp_dir, meta = await perform_universal_download(url, mode, user_id, status_msg)
 
-            await safe_edit_text(status_msg, "📤 <b>টেলিগ্রামে আপলোড করা হচ্ছে...</b>")
+            await safe_edit_text(status_msg, "📤 <b>টেলিগ্রামে আপলোড হচ্ছে...</b>")
 
             platform = detect_platform(url)
             duration_txt = f"\n⏱ <b>দৈর্ঘ্য:</b> {format_duration(meta['duration'])}" if meta['duration'] else ""
@@ -536,9 +559,7 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 
             sent = False
             with open(filepath, "rb") as media_file:
-                # থাম্বনেইল ফাইল থাকলে খোলা
                 thumb_file = open(meta["thumb_path"], "rb") if meta["thumb_path"] and os.path.exists(meta["thumb_path"]) else None
-
                 try:
                     if mode == "audio" or ext in AUDIO_EXTS:
                         await context.bot.send_audio(
@@ -572,12 +593,9 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                         except Exception:
                             media_file.seek(0)
                     elif ext in PHOTO_EXTS:
-                        await context.bot.send_photo(
-                            chat_id=chat_id, photo=media_file, caption=caption, parse_mode=ParseMode.HTML
-                        )
+                        await context.bot.send_photo(chat_id=chat_id, photo=media_file, caption=caption, parse_mode=ParseMode.HTML)
                         sent = True
 
-                    # ভিডিও ফেইল করলে ডকুমেন্ট হিসেবে সেন্ড হবে
                     if not sent:
                         media_file.seek(0)
                         await context.bot.send_document(
@@ -599,7 +617,7 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                 pass
 
         except Exception as e:
-            logger.error("Download Task Error: %s", e)
+            logger.error("Download Error: %s", e)
             await safe_edit_text(status_msg, f"❌ <b>ডাউনলোড ব্যর্থ হয়েছে:</b>\n{e}")
 
         finally:
@@ -607,11 +625,16 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
 # ============================================================================
-# ৯. মেসেজ ও বাটন হ্যান্ডলার
+# ৯. ইউজার ইনপুট ও বাটন হ্যান্ডলার
 # ============================================================================
 async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    register_user(user.id)
+    is_new = register_user(user.id)
+    if is_new and user.id != ADMIN_ID:
+        try:
+            await send_user_info_card(context.bot, ADMIN_ID, user, is_admin_notify=True)
+        except Exception:
+            pass
 
     raw_url = update.message.text.strip()
     if not is_valid_url(raw_url):
@@ -621,13 +644,11 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     url = clean_url(raw_url)
     platform = detect_platform(url)
 
-    # ডিরেক্ট ফাইল হলে সরাসরি নামবে, সোশ্যাল মিডিয়া হলে Video/Audio অপশন দেখাবে
     if is_google_drive_url(url) or is_dropbox_url(url):
         status_msg = await update.message.reply_text("🔎 <b>প্রসেসিং শুরু হচ্ছে...</b>", parse_mode=ParseMode.HTML)
         await process_media_download(context, update.effective_chat.id, user.id, url, "video", status_msg)
         return
 
-    # অপশন মেনু তৈরি
     req_id = str(uuid.uuid4())[:8]
     URL_CACHE[req_id] = url
 
@@ -641,7 +662,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = (
         f"🎯 <b>লিংক শনাক্ত করা হয়েছে!</b>\n\n"
         f"🌐 <b>প্ল্যাটফর্ম:</b> {platform}\n"
-        f"আপনি ফাইলটি কীভাবে ডাউনলোড করতে চান?"
+        f"আপনি কীভাবে ডাউনলোড করতে চান?"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
@@ -655,7 +676,6 @@ async def handle_callback_choice(update: Update, context: ContextTypes.DEFAULT_T
 
     _, mode_flag, req_id = data.split(":")
     url = URL_CACHE.get(req_id)
-
     if not url:
         await query.edit_message_text("❌ লিংকের মেয়াদ শেষ হয়ে গেছে। লিংকটি আবার পাঠান।")
         return
@@ -663,34 +683,41 @@ async def handle_callback_choice(update: Update, context: ContextTypes.DEFAULT_T
     mode = "video" if mode_flag == "v" else "audio"
     mode_text = "🎬 ভিডিও" if mode == "video" else "🎵 অডিও"
 
-    status_msg = await query.edit_message_text(f"⏳ <b>{mode_text} অনুরোধ গ্রহণ করা হয়েছে...</b>", parse_mode=ParseMode.HTML)
-
-    # কিউ টাস্ক শুরু
+    status_msg = await query.edit_message_text(f"⏳ <b>{mode_text} রিকোয়েস্ট গ্রহণ করা হয়েছে...</b>", parse_mode=ParseMode.HTML)
     asyncio.create_task(
         process_media_download(context, update.effective_chat.id, update.effective_user.id, url, mode, status_msg)
     )
 
 # ============================================================================
-# ১০. ইউজার ও ডেভেলপার কমান্ডস
+# ১০. বট কমান্ড ও বাটন রাউটার
 # ============================================================================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    register_user(user.id)
-    text = (
-        f"👋 হ্যালো, <b>{user.first_name}</b>!\n\n"
-        "🎬 যেকোনো <b>YouTube, Facebook, Instagram Reels, TikTok</b> বা সরাসরি মিডিয়া লিংক পাঠান।\n"
-        "ভিডিও বা অডিও (MP3) সিলেক্ট করে সম্পূর্ণ ফ্রিতে দ্রুত ডাউনলোড করে নিন!"
+    is_new = register_user(user.id)
+
+    # ইউজারের প্রোফাইল কার্ড সেন্ড করা (স্ক্রিনশটের মতো)
+    await send_user_info_card(context.bot, update.effective_chat.id, user, is_admin_notify=False)
+
+    # অ্যাডমিনকে নোটিফিকেশন দেওয়া
+    if is_new and user.id != ADMIN_ID:
+        try:
+            await send_user_info_card(context.bot, ADMIN_ID, user, is_admin_notify=True)
+        except Exception:
+            pass
+
+    welcome_text = (
+        f"👋 Welcome, <b>{user.first_name}</b>!\n\n"
+        "🎬 যেকোনো <b>YouTube, Facebook, Instagram Reels, TikTok</b> বা ভিডিও লিংক পাঠান।\n"
+        "সম্পূর্ণ ফ্রীতে সুপার ফাস্ট স্পিডে ডাউনলোড হয়ে যাবে!"
     )
-    await update.message.reply_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard(user.id)
-    )
+    await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard())
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "ℹ️ <b>কীভাবে ব্যবহার করবেন:</b>\n\n"
+        "ℹ️ <b>বট ব্যবহারের নিয়ম:</b>\n\n"
         "১. যেকোনো ভিডিওর শেয়ার লিংক কপি করে পাঠিয়ে দিন।\n"
-        "২. <b>Video (MP4)</b> অথবা <b>Audio (MP3)</b> বাটন চাপুন।\n"
-        "৩. লাইভ প্রোগ্রেস বার শেষ হলে ফাইল পেয়ে যাবেন।"
+        "২. <b>Video (MP4)</b> অথবা <b>Audio (MP3)</b> সিলেক্ট করুন।\n"
+        "৩. সুপার ফাস্ট ডাউনলোড হয়ে ভিডিও পেয়ে যাবেন।"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -706,15 +733,12 @@ async def cmd_dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_b64(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("ব্যবহার: /b64 টেক্সট")
         return
-    text = " ".join(context.args)
-    encoded = base64.b64encode(text.encode()).decode()
+    encoded = base64.b64encode(" ".join(context.args).encode()).decode()
     await update.message.reply_text(f"🔐 Base64:\n<code>{encoded}</code>", parse_mode=ParseMode.HTML)
 
 async def cmd_b64d(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("ব্যবহার: /b64d টেক্সট")
         return
     try:
         decoded = base64.b64decode(" ".join(context.args).encode()).decode()
@@ -725,7 +749,6 @@ async def cmd_b64d(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.partition(" ")[2].strip()
     if not raw:
-        await update.message.reply_text('ব্যবহার: /json {"key": "value"}')
         return
     try:
         parsed = json.loads(raw)
@@ -736,7 +759,6 @@ async def cmd_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("ব্যবহার: /qr টেক্সট")
         return
     text = " ".join(context.args)
     img = qrcode.make(text)
@@ -744,15 +766,6 @@ async def cmd_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     img.save(buf, format="PNG")
     buf.seek(0)
     await update.message.reply_photo(photo=buf, caption=f"📱 QR Code: {text[:100]}")
-
-# ============================================================================
-# ১১. অ্যাডমিন কমান্ডস
-# ============================================================================
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    users = get_all_users()
-    await update.message.reply_text(f"📊 মোট ইউজার: <b>{len(users)}</b> জন", parse_mode=ParseMode.HTML)
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -773,28 +786,30 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {sent} জন ইউজারের কাছে মেসেজ পৌঁছেছে।")
 
 # ============================================================================
-# ১২. ফ্রি টেক্সট রাউটার
+# ১১. কিবোর্ড বাটন রাউটার
 # ============================================================================
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
-    user_id = update.effective_user.id
+    user = update.effective_user
 
-    if text == BTN_HELP:
+    if text == BTN_STATS:
+        total = count_users()
+        # স্ক্রিনশটের স্টাইল
+        await update.message.reply_text(f"📊 <b>Total members : {total} Users</b>", parse_mode=ParseMode.HTML)
+    elif text == BTN_ACCOUNT:
+        # স্ক্রিনশটের স্টাইলে অ্যাকাউন্ট কার্ড
+        await send_user_info_card(context.bot, update.effective_chat.id, user, is_admin_notify=False)
+    elif text == BTN_HELP:
         await cmd_help(update, context)
     elif text == BTN_DEV:
         await cmd_dev(update, context)
-    elif text == BTN_STATS and user_id == ADMIN_ID:
-        await cmd_stats(update, context)
     elif is_valid_url(text):
         await handle_url_message(update, context)
     else:
-        await update.message.reply_text(
-            "🤔 ডাউনলোড করতে সরাসরি কোনো ভিডিও লিংক পাঠান অথবা নিচের বাটন চাপুন।",
-            reply_markup=get_main_keyboard(user_id),
-        )
+        await update.message.reply_text("🤔 ডাউনলোড করতে সরাসরি কোনো ভিডিও লিংক পাঠান অথবা নিচের বাটন চাপুন।", reply_markup=get_main_keyboard())
 
 # ============================================================================
-# ১৩. মেইন ফাংশন
+# ১২. অ্যাপ্লিকেশন এক্সিকিউশন
 # ============================================================================
 def main():
     init_db()
@@ -802,7 +817,6 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("dev", cmd_dev))
@@ -810,13 +824,9 @@ def main():
     app.add_handler(CommandHandler("b64d", cmd_b64d))
     app.add_handler(CommandHandler("json", cmd_json))
     app.add_handler(CommandHandler("qr", cmd_qr))
-    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
 
-    # Inline Choices (Video/Audio)
     app.add_handler(CallbackQueryHandler(handle_callback_choice))
-
-    # Text router
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
     app.run_polling(drop_pending_updates=True)
