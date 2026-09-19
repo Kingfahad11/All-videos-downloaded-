@@ -4,3 +4,5 @@ curl_cffi
 requests>=2.31.0
 qrcode[pil]>=7.4.2
 Pillow>=10.0.0
+aiohttp>=3.9.0
+pycloudflared>=0.1.0

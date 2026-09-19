@@ -2,11 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
- ALL-IN-ONE ULTRA-FAST TELEGRAM DOWNLOADER BOT
- - Screen-matching "USER INFO" Card with Profile Photo
- - Realtime Multi-threaded Super Fast Downloads
- - Admin Alert on New User Join
- - Live Progress Bar & Quality/Audio Selector
+ ALL-IN-ONE ADVANCED MEDIA DOWNLOADER & CLOUDFLARE WEB HOSTING BOT
 ================================================================================
 """
 
@@ -23,9 +19,14 @@ import logging
 import sqlite3
 import tempfile
 import asyncio
+import zipfile
 import mimetypes
 from io import BytesIO
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote
+
+# Web server & Cloudflare tunnel
+from aiohttp import web
+from pycloudflared import try_cloudflare
 
 # Third-party libraries
 from PIL import Image
@@ -64,6 +65,12 @@ ADMIN_ID = int(_ADMIN_ID_RAW)
 MAX_FILE_MB = 48
 MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024
 
+# ওয়েব হোস্টিং ফোল্ডার ও পোর্ট
+HOSTED_SITES_DIR = os.path.abspath("hosted_sites")
+os.makedirs(HOSTED_SITES_DIR, exist_ok=True)
+WEB_PORT = 8080
+CLOUDFLARE_URL = ""
+
 # Wispbyte সেফটি কিউ
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(1)
 PENDING_DOWNLOADS = 0
@@ -73,10 +80,10 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-7s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("telegram_downloader")
+logger = logging.getLogger("all_in_one_bot")
 
 # ============================================================================
-# ২. ডাটাবেজ (ইউজার ট্র্যাক করার জন্য)
+# ২. ডাটাবেজ
 # ============================================================================
 DB_FILE = "users.db"
 
@@ -91,7 +98,6 @@ def init_db():
         logger.warning("DB Init warning: %s", e)
 
 def register_user(user_id) -> bool:
-    """নতুন ইউজার হলে True রিটার্ন করবে"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
@@ -131,10 +137,9 @@ def get_all_users():
         return []
 
 # ============================================================================
-# ৩. ইউজার প্রোফাইল কার্ড বিল্ডার (স্ক্রিনশটের মতো)
+# ৩. ইউজার প্রোফাইল কার্ড (স্ক্রিনশটের মতো)
 # ============================================================================
 async def send_user_info_card(bot, chat_id, user, is_admin_notify=False):
-    """স্ক্রিনশটের ডিজাইনে প্রোফাইল কার্ড সেন্ড করে"""
     uname = f"@{user.username}" if user.username else "None"
     prefix = "🚨 <b>NEW USER NOTIFICATION</b>\n\n" if is_admin_notify else ""
     
@@ -147,9 +152,7 @@ async def send_user_info_card(bot, chat_id, user, is_admin_notify=False):
     )
 
     profile_url = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 View Profile ↗", url=profile_url)]
-    ])
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("👤 View Profile ↗", url=profile_url)]])
 
     try:
         photos = await bot.get_user_profile_photos(user.id, limit=1)
@@ -166,7 +169,6 @@ async def send_user_info_card(bot, chat_id, user, is_admin_notify=False):
     except Exception:
         pass
 
-    # প্রোফাইল ছবি না থাকলে সাধারণ মেসেজ
     await bot.send_message(
         chat_id=chat_id,
         text=caption,
@@ -179,13 +181,15 @@ async def send_user_info_card(bot, chat_id, user, is_admin_notify=False):
 # ============================================================================
 BTN_STATS = "🌐 Statistics"
 BTN_ACCOUNT = "👤 My Account"
+BTN_HOST = "🚀 Web Hosting"
 BTN_HELP = "ℹ️ Help"
 BTN_DEV = "💻 Dev Tools"
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(BTN_STATS), KeyboardButton(BTN_ACCOUNT)],
-        [KeyboardButton(BTN_HELP), KeyboardButton(BTN_DEV)]
+        [KeyboardButton(BTN_HOST), KeyboardButton(BTN_HELP)],
+        [KeyboardButton(BTN_DEV)]
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
@@ -264,18 +268,14 @@ VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".3gp"}
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac"}
 
 # ============================================================================
-# ৬. সুপার ফাস্ট yt-dlp ডাউনলোড ইঞ্জিন (স্পিড অপ্টিমাইজড)
+# ৬. সুপার ফাস্ট yt-dlp ও ডিরেক্ট মিডিয়া ইঞ্জিন
 # ============================================================================
 def _run_ytdlp(url, outtmpl, mode, progress_hook):
     cookie_file = "cookies.txt" if os.path.exists("cookies.txt") else None
-
-    if mode == "audio":
-        format_rule = "bestaudio/best"
-    else:
-        format_rule = (
-            "best[filesize<48M]/bestvideo[height<=720][filesize<40M]+bestaudio/"
-            "best[height<=720]/best[height<=480]/best"
-        )
+    format_rule = "bestaudio/best" if mode == "audio" else (
+        "best[filesize<48M]/bestvideo[height<=720][filesize<40M]+bestaudio/"
+        "best[height<=720]/best[height<=480]/best"
+    )
 
     ydl_opts = {
         "format": format_rule,
@@ -291,17 +291,10 @@ def _run_ytdlp(url, outtmpl, mode, progress_hook):
         "source_address": "0.0.0.0",
         "legacy_server_connect": True,
         "writethumbnail": True,
-
-        # ⚡ সুপার ফাস্ট স্পিড সেটিংস ⚡
-        "concurrent_fragment_downloads": 8,  # প্যারালাল মাল্টি-থ্রেড ডাউনলোড
-        "buffersize": 1048576,               # ১ MB মেমোরি বাফার
-        "http_chunk_size": 10485760,         # ১০ MB চাংক সাইজ (রকেট স্পিড)
-
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "ios", "web"]
-            }
-        },
+        "concurrent_fragment_downloads": 8,
+        "buffersize": 1048576,
+        "http_chunk_size": 10485760,
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
@@ -332,7 +325,6 @@ async def _download_via_ytdlp(url, mode, user_id, status_msg):
 
             percent = (downloaded / total * 100) if total > 0 else 0.0
             bar = create_bar(percent)
-
             speed_txt = f"{human_size(speed)}/s" if speed else "হিসাব হচ্ছে..."
             eta_txt = f"{eta}s" if eta else "..."
 
@@ -348,23 +340,8 @@ async def _download_via_ytdlp(url, mode, user_id, status_msg):
             except Exception:
                 pass
 
-        elif d.get("status") == "finished":
-            text = "⚙️ <b>ডাউনলোড শেষ! ফাইল প্রস্তুত করা হচ্ছে...</b>"
-            try:
-                asyncio.run_coroutine_threadsafe(safe_edit_text(status_msg, text), loop)
-            except Exception:
-                pass
-
     try:
-        info, filename = await loop.run_in_executor(
-            None, _run_ytdlp, url, outtmpl, mode, progress_hook
-        )
-    except yt_dlp.utils.DownloadError as e:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        err_msg = str(e)
-        if "confirm you're not a bot" in err_msg.lower():
-            raise DownloadFailed("ইউটিউব আইপি রেস্ট্রিকশন দিয়েছে। (cookies.txt প্রয়োজন)")
-        raise DownloadFailed("UNSUPPORTED") from e
+        info, filename = await loop.run_in_executor(None, _run_ytdlp, url, outtmpl, mode, progress_hook)
     except Exception as e:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise DownloadFailed(f"এরর: {e}") from e
@@ -376,7 +353,7 @@ async def _download_via_ytdlp(url, mode, user_id, status_msg):
             filename = candidates[0]
         else:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            raise DownloadFailed("ডাউনলোডকৃত ফাইলটি পাওয়া যায়নি।")
+            raise DownloadFailed("ফাইল পাওয়া যায়নি।")
 
     size = os.path.getsize(filename)
     if size > MAX_FILE_BYTES:
@@ -406,7 +383,7 @@ async def _download_via_ytdlp(url, mode, user_id, status_msg):
     return filename, size, temp_dir, meta
 
 # ============================================================================
-# ৭. Google Drive, Dropbox ও Direct Link ইঞ্জিন
+# ৭. Google Drive, Dropbox ও ডিরেক্ট লিংক
 # ============================================================================
 def is_google_drive_url(url: str) -> bool:
     return "drive.google.com" in url or "docs.google.com" in url
@@ -438,17 +415,8 @@ def _http_download_sync(url, dest_dir, progress_cb, referer=None):
         m = re.search(r"confirm=([0-9A-Za-z_-]+)", resp.text)
         if m:
             resp = session.get(f"{url}&confirm={m.group(1)}", headers=headers, stream=True, timeout=25)
-            content_type = resp.headers.get("Content-Type", "")
-
-    if "text/html" in content_type:
-        resp.close()
-        raise DownloadFailed("লিংকটি সরাসরি মিডিয়া ফাইল নয়।")
 
     total = int(resp.headers.get("Content-Length", 0) or 0)
-    if total and total > MAX_FILE_BYTES:
-        resp.close()
-        raise DownloadFailed(f"ফাইলটি খুব বড় ({human_size(total)})! লিমিট {MAX_FILE_MB} MB।")
-
     cd = resp.headers.get("Content-Disposition", "")
     m = re.search(r"filename\*?=(?:UTF-8\'\')?\"?([^\";]+)\"?", cd)
     fname = safe_filename(unquote(m.group(1))) if m else safe_filename(os.path.basename(urlparse(url).path) or "file")
@@ -458,7 +426,7 @@ def _http_download_sync(url, dest_dir, progress_cb, referer=None):
     last_update = {"t": time.time(), "bytes": 0}
 
     with open(dest_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=262144):  # 256KB Chunks
+        for chunk in resp.iter_content(chunk_size=262144):
             if not chunk:
                 continue
             f.write(chunk)
@@ -507,31 +475,22 @@ async def _download_via_http(url, user_id, status_msg, referer=None):
 async def perform_universal_download(url: str, mode: str, user_id: int, status_msg):
     if is_google_drive_url(url):
         file_id = extract_gdrive_file_id(url)
-        if not file_id:
-            raise DownloadFailed("Google Drive আইডি পাওয়া যায়নি।")
         direct_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
-        await safe_edit_text(status_msg, "🔎 Google Drive থেকে ফাইল ফেচ করা হচ্ছে...")
         return await _download_via_http(direct_url, user_id, status_msg)
 
     if is_dropbox_url(url):
         direct_url = normalize_dropbox_url(url)
-        await safe_edit_text(status_msg, "🔎 Dropbox থেকে ফাইল ফেচ করা হচ্ছে...")
         return await _download_via_http(direct_url, user_id, status_msg, referer=url)
 
-    await safe_edit_text(status_msg, "🔎 মিডিয়া তথ্য সংগ্রহ করা হচ্ছে...")
     try:
         return await _download_via_ytdlp(url, mode, user_id, status_msg)
     except DownloadFailed as e:
         if str(e) != "UNSUPPORTED":
             raise
-        await safe_edit_text(status_msg, "🔎 ডিরেক্ট লিঙ্ক ডাউনলোড চেষ্টা করা হচ্ছে...")
-        try:
-            return await _download_via_http(url, user_id, status_msg)
-        except DownloadFailed as e2:
-            raise DownloadFailed("লিংকটি ডাউনলোডের উপযুক্ত নয় বা প্রাইভেট।") from e2
+        return await _download_via_http(url, user_id, status_msg)
 
 # ============================================================================
-# ৮. কিউ ও আল্ট্রা-ফাস্ট আপলোড লজিক
+# ৮. কিউ ও আল্ট্রা-ফাস্ট আপলোড
 # ============================================================================
 async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, url: str, mode: str, status_msg):
     global PENDING_DOWNLOADS
@@ -545,7 +504,6 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         temp_dir = None
         try:
             filepath, size, temp_dir, meta = await perform_universal_download(url, mode, user_id, status_msg)
-
             await safe_edit_text(status_msg, "📤 <b>টেলিগ্রামে আপলোড হচ্ছে...</b>")
 
             platform = detect_platform(url)
@@ -563,31 +521,16 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                 try:
                     if mode == "audio" or ext in AUDIO_EXTS:
                         await context.bot.send_audio(
-                            chat_id=chat_id,
-                            audio=media_file,
-                            caption=caption,
-                            title=meta["title"],
-                            duration=int(meta["duration"]),
-                            thumbnail=thumb_file,
-                            parse_mode=ParseMode.HTML,
-                            read_timeout=300,
-                            write_timeout=300,
+                            chat_id=chat_id, audio=media_file, caption=caption, title=meta["title"],
+                            duration=int(meta["duration"]), thumbnail=thumb_file, parse_mode=ParseMode.HTML
                         )
                         sent = True
                     elif ext in VIDEO_EXTS:
                         try:
                             await context.bot.send_video(
-                                chat_id=chat_id,
-                                video=media_file,
-                                caption=caption,
-                                duration=int(meta["duration"]),
-                                width=int(meta["width"]) if meta["width"] else None,
-                                height=int(meta["height"]) if meta["height"] else None,
-                                thumbnail=thumb_file,
-                                supports_streaming=True,
-                                parse_mode=ParseMode.HTML,
-                                read_timeout=300,
-                                write_timeout=300,
+                                chat_id=chat_id, video=media_file, caption=caption, duration=int(meta["duration"]),
+                                width=int(meta["width"]) if meta["width"] else None, height=int(meta["height"]) if meta["height"] else None,
+                                thumbnail=thumb_file, supports_streaming=True, parse_mode=ParseMode.HTML
                             )
                             sent = True
                         except Exception:
@@ -599,13 +542,7 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                     if not sent:
                         media_file.seek(0)
                         await context.bot.send_document(
-                            chat_id=chat_id,
-                            document=media_file,
-                            caption=caption,
-                            thumbnail=thumb_file,
-                            parse_mode=ParseMode.HTML,
-                            read_timeout=300,
-                            write_timeout=300,
+                            chat_id=chat_id, document=media_file, caption=caption, thumbnail=thumb_file, parse_mode=ParseMode.HTML
                         )
                 finally:
                     if thumb_file:
@@ -625,120 +562,77 @@ async def process_media_download(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
 # ============================================================================
-# ৯. ইউজার ইনপুট ও বাটন হ্যান্ডলার
+# ৯. এইচটিএমএল / সিএসএস / জেএস ওয়েব হোস্টিং হ্যান্ডলার
 # ============================================================================
-async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    is_new = register_user(user.id)
-    if is_new and user.id != ADMIN_ID:
-        try:
-            await send_user_info_card(context.bot, ADMIN_ID, user, is_admin_notify=True)
-        except Exception:
-            pass
-
-    raw_url = update.message.text.strip()
-    if not is_valid_url(raw_url):
-        await update.message.reply_text("🤔 দয়া করে একটি সঠিক ভিডিও লিংক পাঠান।")
+async def handle_document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc:
         return
 
-    url = clean_url(raw_url)
-    platform = detect_platform(url)
-
-    if is_google_drive_url(url) or is_dropbox_url(url):
-        status_msg = await update.message.reply_text("🔎 <b>প্রসেসিং শুরু হচ্ছে...</b>", parse_mode=ParseMode.HTML)
-        await process_media_download(context, update.effective_chat.id, user.id, url, "video", status_msg)
+    fname = doc.file_name.lower()
+    if not (fname.endswith('.html') or fname.endswith('.zip')):
+        await update.message.reply_text("❌ শুধু <b>.html</b> ফাইল অথবা HTML/CSS/JS সহ <b>.zip</b> ফাইল পাঠান।", parse_mode=ParseMode.HTML)
         return
 
-    req_id = str(uuid.uuid4())[:8]
-    URL_CACHE[req_id] = url
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"dl:v:{req_id}"),
-            InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"dl:a:{req_id}")
-        ]
-    ])
-
-    text = (
-        f"🎯 <b>লিংক শনাক্ত করা হয়েছে!</b>\n\n"
-        f"🌐 <b>প্ল্যাটফর্ম:</b> {platform}\n"
-        f"আপনি কীভাবে ডাউনলোড করতে চান?"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-
-async def handle_callback_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    if not data.startswith("dl:"):
+    if doc.file_size > 15 * 1024 * 1024:
+        await update.message.reply_text("❌ ফাইলটি খুব বড়! সর্বোচ্চ ১৫ MB সাইজের ফাইল হোস্ট করতে পারবেন।")
         return
 
-    _, mode_flag, req_id = data.split(":")
-    url = URL_CACHE.get(req_id)
-    if not url:
-        await query.edit_message_text("❌ লিংকের মেয়াদ শেষ হয়ে গেছে। লিংকটি আবার পাঠান।")
-        return
+    status_msg = await update.message.reply_text("⚙️ <b>ওয়েবসাইট প্রসেস ও হোস্ট করা হচ্ছে...</b>", parse_mode=ParseMode.HTML)
 
-    mode = "video" if mode_flag == "v" else "audio"
-    mode_text = "🎬 ভিডিও" if mode == "video" else "🎵 অডিও"
+    site_id = f"site_{str(uuid.uuid4())[:8]}"
+    site_folder = os.path.join(HOSTED_SITES_DIR, site_id)
+    os.makedirs(site_folder, exist_ok=True)
 
-    status_msg = await query.edit_message_text(f"⏳ <b>{mode_text} রিকোয়েস্ট গ্রহণ করা হয়েছে...</b>", parse_mode=ParseMode.HTML)
-    asyncio.create_task(
-        process_media_download(context, update.effective_chat.id, update.effective_user.id, url, mode, status_msg)
-    )
+    try:
+        file_obj = await context.bot.get_file(doc.file_id)
+        local_path = os.path.join(site_folder, doc.file_name)
+        await file_obj.download_to_drive(local_path)
+
+        # ZIP ফাইল হলে আনজিপ করা
+        if fname.endswith('.zip'):
+            with zipfile.ZipFile(local_path, 'r') as zip_ref:
+                zip_ref.extractall(site_folder)
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
+
+        # HTML ফাইলের নাম index.html না হলে রিনেম বা হ্যান্ডেল করা
+        index_exists = any(os.path.exists(os.path.join(site_folder, f)) for f in ["index.html", "index.htm"])
+        if fname.endswith('.html') and not index_exists:
+            os.rename(local_path, os.path.join(site_folder, "index.html"))
+
+        live_url = f"{CLOUDFLARE_URL}/sites/{site_id}/"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open Website ↗", url=live_url)]])
+
+        caption = (
+            f"🎉 <b>আপনার ওয়েবসাইট সফলভাবে লাইভ হয়েছে!</b>\n\n"
+            f"📁 <b>ফাইল:</b> {doc.file_name}\n"
+            f"🆔 <b>সাইট আইডি:</b> <code>{site_id}</code>\n"
+            f"🔗 <b>লাইভ লিংক:</b>\n{live_url}\n\n"
+            f"<i>(নিচের বাটনে চাপ দিয়ে সরাসরি ব্রাউজারে দেখুন)</i>"
+        )
+        await status_msg.delete()
+        await update.message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error("Hosting Error: %s", e)
+        await safe_edit_text(status_msg, f"❌ ওয়েবসাইট হোস্টিং ব্যর্থ হয়েছে: {e}")
 
 # ============================================================================
-# ১০. বট কমান্ড ও বাটন রাউটার
+# ১০. ডেভেলপার টুলস ও অ্যাডমিন কমান্ড হ্যান্ডলার
 # ============================================================================
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    is_new = register_user(user.id)
-
-    # ইউজারের প্রোফাইল কার্ড সেন্ড করা (স্ক্রিনশটের মতো)
-    await send_user_info_card(context.bot, update.effective_chat.id, user, is_admin_notify=False)
-
-    # অ্যাডমিনকে নোটিফিকেশন দেওয়া
-    if is_new and user.id != ADMIN_ID:
-        try:
-            await send_user_info_card(context.bot, ADMIN_ID, user, is_admin_notify=True)
-        except Exception:
-            pass
-
-    welcome_text = (
-        f"👋 Welcome, <b>{user.first_name}</b>!\n\n"
-        "🎬 যেকোনো <b>YouTube, Facebook, Instagram Reels, TikTok</b> বা ভিডিও লিংক পাঠান।\n"
-        "সম্পূর্ণ ফ্রীতে সুপার ফাস্ট স্পিডে ডাউনলোড হয়ে যাবে!"
-    )
-    await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard())
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "ℹ️ <b>বট ব্যবহারের নিয়ম:</b>\n\n"
-        "১. যেকোনো ভিডিওর শেয়ার লিংক কপি করে পাঠিয়ে দিন।\n"
-        "২. <b>Video (MP4)</b> অথবা <b>Audio (MP3)</b> সিলেক্ট করুন।\n"
-        "৩. সুপার ফাস্ট ডাউনলোড হয়ে ভিডিও পেয়ে যাবেন।"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-async def cmd_dev(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "💻 <b>Developer Tools:</b>\n\n"
-        "/b64 TEXT - Base64 Encode\n"
-        "/b64d TEXT - Base64 Decode\n"
-        "/json JSON - Pretty Print JSON\n"
-        "/qr TEXT - Generate QR Code"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
 async def cmd_b64(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
+        await update.message.reply_text("ব্যবহার: /b64 টেক্সট")
         return
     encoded = base64.b64encode(" ".join(context.args).encode()).decode()
     await update.message.reply_text(f"🔐 Base64:\n<code>{encoded}</code>", parse_mode=ParseMode.HTML)
 
 async def cmd_b64d(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
+        await update.message.reply_text("ব্যবহার: /b64d টেক্সট")
         return
     try:
         decoded = base64.b64decode(" ".join(context.args).encode()).decode()
@@ -749,6 +643,7 @@ async def cmd_b64d(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.partition(" ")[2].strip()
     if not raw:
+        await update.message.reply_text('ব্যবহার: /json {"key": "value"}')
         return
     try:
         parsed = json.loads(raw)
@@ -759,6 +654,7 @@ async def cmd_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
+        await update.message.reply_text("ব্যবহার: /qr টেক্সট")
         return
     text = " ".join(context.args)
     img = qrcode.make(text)
@@ -786,50 +682,178 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {sent} জন ইউজারের কাছে মেসেজ পৌঁছেছে।")
 
 # ============================================================================
-# ১১. কিবোর্ড বাটন রাউটার
+# ১১. টেক্সট ও কলব্যাক রাউটার
 # ============================================================================
+async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    is_new = register_user(user.id)
+    if is_new and user.id != ADMIN_ID:
+        try:
+            await send_user_info_card(context.bot, ADMIN_ID, user, is_admin_notify=True)
+        except Exception:
+            pass
+
+    raw_url = update.message.text.strip()
+    if not is_valid_url(raw_url):
+        await update.message.reply_text("🤔 দয়া করে একটি সঠিক ভিডিও লিংক বা কোনো .html/.zip ফাইল পাঠান।")
+        return
+
+    url = clean_url(raw_url)
+    platform = detect_platform(url)
+
+    if is_google_drive_url(url) or is_dropbox_url(url):
+        status_msg = await update.message.reply_text("🔎 <b>প্রসেসিং শুরু হচ্ছে...</b>", parse_mode=ParseMode.HTML)
+        await process_media_download(context, update.effective_chat.id, user.id, url, "video", status_msg)
+        return
+
+    req_id = str(uuid.uuid4())[:8]
+    URL_CACHE[req_id] = url
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"dl:v:{req_id}"),
+            InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"dl:a:{req_id}")
+        ]
+    ])
+    text = f"🎯 <b>লিংক শনাক্ত হয়েছে!</b>\n\n🌐 <b>প্ল্যাটফর্ম:</b> {platform}\nকীভাবে ডাউনলোড করতে চান?"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+async def handle_callback_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("dl:"):
+        return
+
+    _, mode_flag, req_id = data.split(":")
+    url = URL_CACHE.get(req_id)
+    if not url:
+        await query.edit_message_text("❌ লিংকের মেয়াদ শেষ হয়ে গেছে। আবার পাঠান।")
+        return
+
+    mode = "video" if mode_flag == "v" else "audio"
+    mode_text = "🎬 ভিডিও" if mode == "video" else "🎵 অডিও"
+    status_msg = await query.edit_message_text(f"⏳ <b>{mode_text} রিকোয়েস্ট গ্রহণ করা হয়েছে...</b>", parse_mode=ParseMode.HTML)
+    asyncio.create_task(process_media_download(context, update.effective_chat.id, update.effective_user.id, url, mode, status_msg))
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    is_new = register_user(user.id)
+
+    await send_user_info_card(context.bot, update.effective_chat.id, user, is_admin_notify=False)
+    if is_new and user.id != ADMIN_ID:
+        try:
+            await send_user_info_card(context.bot, ADMIN_ID, user, is_admin_notify=True)
+        except Exception:
+            pass
+
+    welcome_text = (
+        f"👋 Welcome, <b>{user.first_name}</b>!\n\n"
+        "🎬 <b>ভিডিও ডাউনলোডার:</b> যেকোনো YouTube, FB, Insta, TikTok লিংক পাঠান।\n"
+        "🌐 <b>ওয়েব হোস্টিং:</b> যেকোনো <code>.html</code> বা <code>.zip</code> কোড ফাইল পাঠালে সাথে সাথে লাইভ ওয়েবসাইট লিংক পেয়ে যাবেন!"
+    )
+    await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=get_main_keyboard())
+
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     user = update.effective_user
 
     if text == BTN_STATS:
         total = count_users()
-        # স্ক্রিনশটের স্টাইল
         await update.message.reply_text(f"📊 <b>Total members : {total} Users</b>", parse_mode=ParseMode.HTML)
     elif text == BTN_ACCOUNT:
-        # স্ক্রিনশটের স্টাইলে অ্যাকাউন্ট কার্ড
         await send_user_info_card(context.bot, update.effective_chat.id, user, is_admin_notify=False)
+    elif text == BTN_HOST:
+        host_info = (
+            "🚀 <b>ফ্রি ওয়েবসাইট হোস্টিং গাইড:</b>\n\n"
+            "১. আপনার তৈরি করা <code>index.html</code> ফাইলটি এই বটে ডকুমেন্ট হিসেবে পাঠান।\n"
+            "২. অথবা পুরো প্রজেক্টের (HTML, CSS, JS) একটি <code>.zip</code> ফাইল পাঠান।\n"
+            "৩. বট আপনাকে একটি ফ্রি <b>Cloudflare HTTPS</b> ওয়েবসাইট লিংক প্রদান করবে।"
+        )
+        await update.message.reply_text(host_info, parse_mode=ParseMode.HTML)
     elif text == BTN_HELP:
-        await cmd_help(update, context)
+        await update.message.reply_text(
+            "ℹ️ <b>বট ব্যবহারের নিয়ম:</b>\n\n"
+            "১. যেকোনো ভিডিওর লিংক দিলে ভিডিও বা অডিও ডাউনলোড হবে।\n"
+            "২. যেকোনো HTML বা ZIP কোড ফাইল দিলে সাথে সাথে ওয়েবসাইট হোস্ট হয়ে যাবে।\n"
+            "৩. ডেভেলপার টুলস ব্যবহারের জন্য /dev কমান্ড দিন।", 
+            parse_mode=ParseMode.HTML
+        )
     elif text == BTN_DEV:
-        await cmd_dev(update, context)
+        dev_info = (
+            "💻 <b>Developer Tools:</b>\n\n"
+            "/b64 TEXT - Base64 Encode\n"
+            "/b64d TEXT - Base64 Decode\n"
+            "/json JSON - Pretty Print JSON\n"
+            "/qr TEXT - Generate QR Code"
+        )
+        await update.message.reply_text(dev_info, parse_mode=ParseMode.HTML)
     elif is_valid_url(text):
         await handle_url_message(update, context)
     else:
-        await update.message.reply_text("🤔 ডাউনলোড করতে সরাসরি কোনো ভিডিও লিংক পাঠান অথবা নিচের বাটন চাপুন।", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🤔 ভিডিও লিংক পাঠান ডাউনলোডের জন্য, অথবা কোনো HTML/ZIP ফাইল পাঠান ওয়েবসাইট হোস্ট করতে।")
 
 # ============================================================================
-# ১২. অ্যাপ্লিকেশন এক্সিকিউশন
+# ১২. ব্যাকগ্রাউন্ড ওয়েব সার্ভার ও ক্লাউডফ্লেয়ার টানেল
 # ============================================================================
-def main():
+async def start_web_server():
+    global CLOUDFLARE_URL
+    app = web.Application()
+    app.router.add_static('/sites/', path=HOSTED_SITES_DIR, show_index=True)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', WEB_PORT)
+    await site.start()
+    logger.info("Local Web Server running on port %s", WEB_PORT)
+
+    try:
+        logger.info("Starting Cloudflare Tunnel...")
+        tunnel = try_cloudflare(port=WEB_PORT)
+        CLOUDFLARE_URL = tunnel.tunnel_url
+        logger.info("Cloudflare Tunnel Live at: %s", CLOUDFLARE_URL)
+        print(f"\n==========================================")
+        print(f"🌐 Cloudflare Live Domain: {CLOUDFLARE_URL}")
+        print(f"==========================================\n")
+    except Exception as e:
+        logger.error("Cloudflare Tunnel Error: %s", e)
+        CLOUDFLARE_URL = f"http://localhost:{WEB_PORT}"
+
+# ============================================================================
+# ১৩. মূল অ্যাপ্লিকেশন এক্সিকিউশন
+# ============================================================================
+async def main_async():
     init_db()
-    logger.info("Bot starting up...")
+    await start_web_server()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Commands
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("dev", cmd_dev))
     app.add_handler(CommandHandler("b64", cmd_b64))
     app.add_handler(CommandHandler("b64d", cmd_b64d))
     app.add_handler(CommandHandler("json", cmd_json))
     app.add_handler(CommandHandler("qr", cmd_qr))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
 
+    # Choices & Files
     app.add_handler(CallbackQueryHandler(handle_callback_choice))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-    app.run_polling(drop_pending_updates=True)
+    logger.info("Bot is fully running...")
+    async with app:
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        while True:
+            await asyncio.sleep(3600)
+
+def main():
+    try:
+        asyncio.run(main_async())
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 if __name__ == "__main__":
     main()
